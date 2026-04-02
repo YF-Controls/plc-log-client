@@ -1,15 +1,74 @@
 from time import sleep
 import threading
 import socket
-from Lib.console_colored_text import ConsoleColor, ConsoleStyle, colored_text, red_text
-from Lib.tcp_client_base import TCPClientBase
+from lib.console_colored_text import ConsoleColor, ConsoleStyle, colored_text, red_text
+from lib.tcp_client_base import TCPClientBase
 
 # Function
-def findSubstring(text, substrings):
-  for substring in substrings:
-    if substring in text:
-      return True
-  return False
+def matches_filter(text: str, show_messages: list[list[str]]) -> bool:
+  """Returns True if text satisfies all AND groups, each group being an OR of substrings."""
+  return all(
+    any(substring in text for substring in group)
+    for group in show_messages
+  )
+
+class FragmentAssembler:
+  """Reassembles fragmented PLC log messages.
+
+  Header format (17 chars fixed):
+    [0:5]  totalLength  - total length of the assembled message
+    [5:8]  partLength   - payload length of this fragment
+    [8:12] parts        - total number of fragments
+    [12:16] part        - index of this fragment (base 1)
+    [16]   ';'          - separator
+    [17:]  payload      - fragment data (partLength chars)
+
+  Fragments must arrive in order (part 1, 2, ..., parts).
+  Out-of-sequence fragments discard the current buffer and
+  return DISCARD. A new cycle starts when part == 1 arrives.
+  """
+
+  DISCARD = object()  # Sentinel: out-of-sequence fragment received
+
+  def __init__(self):
+    self._chunks: list[str] = []
+    self._next_part: int = 1
+
+  def feed(self, raw: str) -> str | None | object:
+    """Process one received fragment.
+
+    Returns:
+      str              : complete assembled message (all parts received)
+      None             : fragment accepted, waiting for more parts
+      DISCARD sentinel : out-of-sequence fragment, current buffer discarded
+    """
+    parts       = int(raw[8:12])
+    part        = int(raw[12:16])
+    part_length = int(raw[5:8])
+    payload     = raw[17:17 + part_length]
+
+    if part != self._next_part:
+      # Unexpected fragment: reset and signal caller
+      self._chunks = []
+      self._next_part = 1
+      if part != 1:
+        return FragmentAssembler.DISCARD
+      # part == 1 after reset: start new cycle (fall through)
+
+    if part == 1:
+      self._chunks = []
+
+    self._chunks.append(payload)
+    self._next_part = part + 1
+
+    if part == parts:
+      message = ''.join(self._chunks)
+      self._chunks = []
+      self._next_part = 1
+      return message
+
+    return None  # Still waiting for more fragments
+
 
 class PlcLogReader(TCPClientBase):
   """TCP Client to read PLC Log
@@ -22,43 +81,57 @@ class PlcLogReader(TCPClientBase):
     self.name = name
     self.console_color = console_color
   
-  def run(self, discard_messages = None, show_messages: list[str] | None = None, and_show_messages: list[str] | None = None, replaces = None):
-    """Receive data
+  def run(self,
+          fragmented_log: bool = False,
+          discard_messages: list[str] | None = None,
+          show_messages: list[list[str]] | None = None,
+          replaces: list[list[str]] | None = None):
     """
+    Receive data
+    """
+    assembler = FragmentAssembler() if fragmented_log else None
+
     try:
       while self.connected:
         try:
-          # Receive message
-          message = self._receive()
+          # Receive raw fragment or full message
+          raw = self._receive()
 
-          # Check if message must be discarted
+          if assembler:
+            result = assembler.feed(raw)
+            if result is FragmentAssembler.DISCARD:
+              print(colored_text(f'{self.name} >>> Unknown fragmented message received', color=self.console_color))
+              continue
+            if result is None:
+              continue  # Waiting for more fragments
+            message = result
+          else:
+            message = raw
+
+          # Check if message must be discarded
           if discard_messages:
-            if findSubstring(message, discard_messages):
+            if any(s in message for s in discard_messages):
               continue
-            
-          # Check if message must be showed
+
+          # Check if message must be showed (AND of ORs)
           if show_messages:
-            if not findSubstring(message, show_messages):
+            if not matches_filter(message, show_messages):
               continue
-          
-          if and_show_messages:
-            if not findSubstring(message, and_show_messages):
-              continue
-          
+
           # Replace characters in message
           if replaces:
             for find, replace_with in replaces:
               message = message.replace(find, replace_with)
-            
+
           # Show message
-          print(colored_text(f'{self.name} >>> {message}', color= self.console_color))
-          
-        except socket.timeout as e:
+          print(colored_text(f'{self.name} >>> {message}', color=self.console_color))
+
+        except socket.timeout:
           continue  # Continue loop if timeout
-        
-        except ConnectionError as e:
+
+        except ConnectionError:
           break  # Exit loop if connection error
-    
+
     except Exception as e:
       print(colored_text(f"{self.name} >>> Error on main loop:", color=self.console_color), red_text(e.strerror))
       raise
@@ -67,18 +140,18 @@ class PlcLogReaderThread(threading.Thread):
   """Thread para manejar la conexión a un servidor PLC
   """
   
-  def __init__(self, host: str, port: int, server_name: str = None, console_color = None,
-              discard_messages=None, show_messages=None, and_show_mesages=None, replaces=None,
+  def __init__(self, host: str,  fragmented_log: bool, port: int, server_name: str = None, console_color = None,
+              discard_messages=None, show_messages=None, replaces=None,
               timeout: float = 5.0, show_timeout_message: bool = False):
     
     threading.Thread.__init__(self)
     self.host = host
+    self.fragmented_log = fragmented_log
     self.port = port
     self.server_name = server_name or f"{host}:{port}"
     self.console_color = console_color
     self.discard_messages = discard_messages
     self.show_messages = show_messages
-    self.and_show_messages = and_show_mesages
     self.replaces = replaces
     self.timeout = timeout
     self.show_timeout_message = show_timeout_message
@@ -95,9 +168,9 @@ class PlcLogReaderThread(threading.Thread):
         with PlcLogReader(self.host, self.port, self.server_name, self.console_color,  
                         self.timeout, self.show_timeout_message) as plc:
           plc.run(
+              fragmented_log=self.fragmented_log,
               discard_messages=self.discard_messages,
               show_messages=self.show_messages,
-              and_show_messages=self.and_show_messages,
               replaces=self.replaces
           )
       
@@ -122,19 +195,20 @@ class PlcMultiServerManager:
   def __init__(self):
     self.threads = []
   
-  def add_server(self, host: str, port: int, server_name: str = None, console_color = None,
-                discard_messages=None, show_messages=None, and_show_messages=None, replaces=None,
-                timeout: float = 5.0, show_timeout_message: bool = False):
+  def add_server(self, host: str, fragmented_log: bool,
+                 port: int, server_name: str = None, console_color = None,
+                 discard_messages=None, show_messages=None, replaces=None,
+                 timeout: float = 5.0, show_timeout_message: bool = False):
     """Añade un servidor a la lista de conexiones
     """
     thread = PlcLogReaderThread(
+      fragmented_log=fragmented_log,
       host=host,
       port=port,
       server_name=server_name,
       console_color = console_color,
       discard_messages=discard_messages,
       show_messages=show_messages,
-      and_show_mesages=and_show_messages,
       replaces=replaces,
       timeout=timeout,
       show_timeout_message=show_timeout_message

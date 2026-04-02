@@ -1,0 +1,23 @@
+{
+  "servers": [
+    {
+      "fragmented_log": true,
+      "name": "Flapper",
+      "host": "172.16.0.20",
+      "port": 2000,
+      "console_color": "BLUE",
+      "show_messages": [[":CA:", ":IC:", ":RR:", ":ES:", ":VE:"]],
+      "replaces": [["\r\n", ""], ["\\\\/\/", "\n"]]
+    },
+    {
+      "fragmented_log": true,
+      "name": "Master*",
+      "host": "172.16.2.20",
+      "port": 2000,
+      "console_color": "GREEN",
+      "show_messages": [["position"], ["S03I12"]],
+      "discard_messages": ["ACK"],
+      "replaces": [["\r\n", ""], ["}{" , "\n"]]
+    }
+  ]
+}

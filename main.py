@@ -1,71 +1,47 @@
 from time import sleep
-from Lib.console_colored_text import ConsoleColor, ConsoleStyle, ConsoleBackground, print_colored
-from Lib.plc_log_reader import PlcMultiServerManager
+import json
+from lib.console_colored_text import ConsoleColor, ConsoleStyle, ConsoleBackground, print_colored
+from lib.plc_log_reader import PlcMultiServerManager
 
 # Execute
 if __name__ == "__main__":
   
+  # Show welcome message
   print_colored(' ############################# ', color=ConsoleColor.BLUE, styles=ConsoleStyle.BOLD, background=ConsoleBackground.WHITE)
   print_colored('  PLC Log Reader Application!  ', color=ConsoleColor.BLUE, styles=ConsoleStyle.BOLD, background=ConsoleBackground.WHITE)
   print_colored(' ############################# ', color=ConsoleColor.BLUE, styles=ConsoleStyle.BOLD, background=ConsoleBackground.WHITE)
   
-  
-  
-  servers = [
-    {
-      'name': 'Flapper', 'host': '172.16.0.20', 'port': 2000,
-      'console_color' : ConsoleColor.BLUE,
-      'show_messages' : [':CA:', ':IC:', ':RR:', ':ES:', ':VE:'],
-      'replaces' : [('\r\n', ''), ('\\\\//', '\n')]
-    },
-    {
-      'name': 'Master*', 'host': '172.16.2.20', 'port': 2000, 
-      'console_color' : ConsoleColor.GREEN,
-      #'show_messages' : ['position', 'p-alarms', 'release', 'p-empty', 'p-inmode','p-opmode', 'p-enable', 'p-in-en'],
-      'show_messages' : ['position'],
-      'and_show_messages' : ['S03I12'],
-      'discard_messages' :  ['ACK'],
-      'replaces' : [('\r\n', ''), ('}{', '\n')]
-    }
-  ]
-  
-  servers2 = [
-    {'name': 'Flapper', 'host': '172.16.0.20', 'port': 2000,
-     'console_color' : ConsoleColor.BLUE,
-     'show_messages' : [':CA:', ':IC:', ':RR:', ':ES:', ':VE:']
-    },
+  # Load configuration
+  with open('config.json', 'r', encoding='utf-8') as f:
+    config = json.load(f)
 
-    {'name': 'Master*', 'host': '172.16.2.20', 'port': 2000, 
-     'console_color' : ConsoleColor.GREEN,
-     'discard_messages' : [',ACK,'],
-     #'show_messages' : ['position', 'p-alarms', 'release', 'p-empty', 'p-inmode','p-opmode', 'p-enable', 'p-in-en'],
-     'show_messages' : ['position'], 
-     'and_show_messages' : ['S03I06'],
-     'replaces' : [('\r\n', ''), ('}{', '}\r\n{')]
-    }
-  ]
-
-  # Crear gestor de múltiples servidores
+  # Process server configurations
+  servers = config.get('servers', [])
+  for server in servers:
+    if 'console_color' in server:
+      server['console_color'] = ConsoleColor[server['console_color']]
+  
+  # Multiple server manager
   manager = PlcMultiServerManager()
   
-  # Añadir servidores
+  # Add servers to manager
   for server in servers:
     manager.add_server(
+      fragmented_log = server.get('fragmented_log', False),
       host = server["host"],
       port = server["port"],
       server_name = server["name"],
       console_color = server['console_color'],
       show_messages = server.get("show_messages"),
-      and_show_messages = server.get('and_show_messages'),
       replaces = server.get("replaces"),
       discard_messages = server.get("discard_messages")
     )
   
   try:
-    # Iniciar todas las conexiones
+    # Start all connections
     manager.start_all()
     
-    # Mantener el programa ejecutándose
+    # Keep the program running until interrupted
     print("Press Ctrl+C to stop all connections...")
     while manager.is_any_alive():
       sleep(1)
